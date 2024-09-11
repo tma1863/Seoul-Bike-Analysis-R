@@ -1,0 +1,1058 @@
+---
+title: "Project cuối kì - Seoul Bikes Analysis"
+auhor: " Nhóm A" 
+output:
+  html_document: default
+date: "2024-7-7"
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+```{r library,, include=FALSE}
+library(lmPerm)
+library(tidyr)
+library(dplyr)
+library(boot)
+library(ggplot2)
+library(GGally)
+library(glmnet)
+library(caret)
+library(ggdist)
+library(ipred)
+library(car)
+library(stats)
+library(conflicted)
+library(ggfortify)
+library(FactoMineR)
+library(cowplot)
+library(splines)
+conflicts_prefer(dplyr::select)
+conflicts_prefer(dplyr::filter)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+# EDA + Preprocessing
+
+```{r read and clean data}
+data <- read.csv('data/SeoulBikeData.csv',fileEncoding = "latin1",check.names = F)
+glimpse(data)
+```
+
+```{r}
+data <- data |> janitor::clean_names()
+data <- data %>%
+  filter(functioning_day == "Yes") |> select(-functioning_day)
+data <- data %>%
+  drop_na()
+data <- data %>%
+  mutate(holiday = ifelse(holiday == "No Holiday", 0, 1))
+data <- data %>%
+  mutate(time =  case_when(
+    hour >=4 & hour <11 ~ "sang",
+    hour >=11 & hour <13 ~ "trua",
+    hour >=13 & hour <18 ~ "chieu",
+    .default = "toi"
+  ))
+data$seasons <- factor(data$seasons)
+data$holiday <- factor(data$holiday)
+data$hour <- factor(data$hour)
+```
+
+## Visualization
+
+```{r}
+data |> select(-c(date,hour,seasons,holiday,time)) |>  gather(variable, value) |> group_by(variable)|> summarise(mean = round(mean(value),4),sd = sd(value),median =median(value))
+```
+
+```{r fig.align="center",fig.width = 10, fig.height=7}
+data_m <-data |> select(-c(date)) |>  gather(variable, value,-c(rented_bike_count,hour,seasons,holiday,time))
+ggplot(data_m,aes(x = value, y = after_stat(density))) + 
+    facet_wrap(~variable, scales = "free") + 
+    geom_histogram(aes(y = after_stat(density)), color = "white", fill="lightblue", alpha=1, position="identity", add_density = TRUE) + geom_density() + theme_minimal()
+```
+
+Tổng quan về dữ liệu:
+
+-   Dew point temperature: Dữ liệu phân bố từ -30°C tới 25°C. Trong đó,
+    phần lớn giá trị nằm trong khoảng nhiệt độ từ 0°C đến 25°C.
+
+-   Humidity percent: Biểu đồ histogram cho thấy phân bố độ ẩm phần trăm
+    từ 0% đến 100%. Các giá trị độ ẩm thường xuất hiện nhất rơi vào
+    khoảng từ 40% đến 80%.
+
+-   Rainfall: Lượng mưa chủ yếu tập trung ở gần giá trị 0. Dựa vào biểu
+    đồ, có thể thấy các giá trị mưa lớn là rất hiếm trong tập dữ liệu.
+
+-   Snowfall: Dữ liệu phân bố từ 0cm tới 9cm. Tuy nhiên, phần lớn dữ
+    liệu tập trung ở giá trị 0cm.
+
+-   Solar radiation: Phân bố bức xạ mặt trời tập trung chủ yếu ở giá trị
+    rất thấp gần 0 MJ/m².
+
+-   Temperature: Dữ liệu nhiệt độ phân bố từ -17°C tới 40°C. Trong đó,
+    nhiệt độ phân bố chủ yếu từ 0°C tới 25°C. Giá trị 20°C có mật độ cao
+    nhất.
+
+-   Visibility: Biểu đồ cho thấy phần lớn các giá trị tầm nhìn tập trung
+    ở khoảng 2000 đơn vị. Ngoài một số ít trường hợp, dữ liệu cho thấy
+    tần suất xuất hiện của các giá trị tầm nhìn thấp hơn (dưới 2000 đơn
+    vị) là rất ít.
+
+-   Wind speed: Biểu đồ cho thấy tốc độ gió thường tập trung nhiều ở
+    khoảng từ 0 đến 2m/s, với đỉnh tại khoảng 1m/s.
+
+```{r fig.align="center",fig.width = 10, fig.height=7}
+ggplot(data_m,aes(x = value,color = seasons)) + 
+    facet_wrap(~variable, scales = "free") + 
+    geom_boxplot() + theme_minimal()
+```
+
+Nhận xét về các boxplot:
+
+-   Dew point temperature: Các điểm ngưng sương cao nhất ở mùa hè, thấp
+    nhất ở mùa đông, các mùa còn lại có trung vị là trung bình của 2 mùa
+    hè và đông
+
+-   Humidity percent: Thấp nhất tại mùa đông và độ ẩm cao tương đương
+    nhau ở các mùa còn lại
+
+-   Rainfall: Lưu lượng mưa có giá trị có thể quan sát cao nhất tại mùa
+    hè, xuân, thu còn mùa đông lượng mưa không có quan sát
+
+-   Snowfall: Độ dày của tuyết chỉ có thể quan sát tại mùa đông
+
+-   Solar radiation: Bức xạ mặt trời cao tại mùa hè và thấp ở mùa đông
+
+-   Temperature: Nhiệt độ cao tại mùa hè và thấp tại mùa đông, 2 mùa còn
+    lại tương đương nhau
+
+-   Visbility: Cao nhất tại mùa thu và thấp nhất tại mùa xuân, mùa đông
+    và hè tương đương
+
+-   Wind speed: Tốc độ gió gần như không có khác biệt đáng kể giữa các
+    mùa.
+
+```{r fig.align="center", fig.width = 14, fig.height=5}
+data_by_day <- data %>% mutate(date = as.Date(date, "%d/%m/%Y")) %>% group_by(date) %>% summarise(rented_bike_count = sum(rented_bike_count), seasons = first(seasons))
+ggplot(data = data_by_day, aes(x=date, y=rented_bike_count, colour = seasons)) + geom_line(alpha=.3) + geom_smooth(span = 0.2, se=F) + theme_minimal()
+```
+
+Nhận xét:
+
+-   Vào mùa đông, số lượng thuê xe đạp là thấp nhất.
+
+-   Số lượng thuê xe đạp cao nhất ở thời điểm cuối mùa xuân và đầu mùa
+    hè.
+
+-   Số lượng thuê xe đạp có sự tăng, giảm không ổn định. Điều này có thể
+    do tác động của những yếu tố như ngày nghỉ, lượng mưa, độ ẩm,....
+
+```{r fig.align="center" ,fig.width = 10, fig.height=7}
+ggplot(data_m,aes(y = rented_bike_count,x = value, color = time)) + 
+    facet_wrap(~variable, scales = "free") + 
+     geom_point( alpha = 0.3, shape = 16)+
+  stat_smooth(se=F) 
+```
+
+Nhận xét: Nhìn chung, mối quan hệ giữa các biến độc lập và biến phụ
+thuộc tương đối ổn định qua các thời điểm trong ngày (trừ biến Solar
+radition).
+
+```{r fig.align="center", fig.width = 10, fig.height=7}
+ggplot(data_m,aes(y = rented_bike_count,x = value, color = seasons)) + 
+    facet_wrap(~variable, scales = "free") + 
+     geom_point( alpha = 0.3, shape = 16)+
+  stat_smooth(se=F)
+```
+
+**Nhận xét:** Có thể thấy, mối quan hệ giữa các biến độc lập và biến phụ
+thuộc có sự thay đổi khá nhiều qua từng mùa.
+
+\*\* Vì vậy, chúng ta cần xây dựng mô hình cho từng mùa để tránh sự biến
+động của dữ liệu, tăng sự ổn định của mô hình hồi quy và giảm độ phức
+tạp trong phân tích. \*\*
+
+\*\* Ngoài ra, dựa vào các biểu đồ, có thể thấy mối quan hệ giữa các
+biến độc lập và biến phụ tuân theo hàm mũ, do đó, chúng ta nên áp dụng
+phương pháp hồi quy poisson. \*\*
+
+```{r fig.align="center",fig.width = 10, fig.height=7}
+ggplot(data,aes(y = humidity_percent,x = hour, color = rented_bike_count)) +
+  geom_jitter(alpha = 0.5, shape = 16) 
+```
+
+Nhận xét:
+
+-   Từ 0h đến 9h và từ 19h đến 23h: Có thể thấy trong hai khung giờ này,
+    khi độ ẩm nằm trong khoảng từ 50% đến 80%, số lượng khách hàng thuê
+    xe đạp nhiều hơn. Điều này có thể là do trong hai khung giờ đó,
+    nhiệt độ thường khá mát mẻ hoặc lạnh, và độ ẩm từ 50% đến 80% là
+    điều kiện lý tưởng để đi xe đạp.
+
+-   Từ 9h đến 19h: Ở khung giờ này, thời tiết đang nóng dần lên nên
+    khách hàng có nhu cầu thuê xe đạp nhiều hơn khi độ ẩm nằm trong
+    khoảng từ 25% tới 60%.
+
+```{r fig.align="center" ,fig.width = 10, fig.height=7}
+ggplot(data,aes(y = temperature_c,x = hour, color = rented_bike_count)) +
+  geom_jitter(alpha = 0.5, shape = 16) 
+```
+
+Nhận xét:
+
+-   Số lượng xe đạp được thuê có xu hướng tăng vào các giờ sáng sớm
+    (khoảng 7-9 giờ) và buổi chiều tối (khoảng 17-19 giờ).
+
+-   Khi nhiệt độ tăng, đặc biệt là từ khoảng 10°C đến 30°C, số lượng xe
+    đạp được thuê cũng tăng lên.
+
+-   Ở các nhiệt độ cực đoan (dưới 0°C và trên 30°C), số lượng xe đạp
+    được thuê giảm đi, điều này có thể do điều kiện thời tiết không
+    thuận lợi cho việc đi xe đạp.
+
+```{r fig.align="center",fig.width = 10, fig.height=7}
+ggplot(data,aes(x = rented_bike_count,y = time)) + 
+    stat_halfeye(  position = "dodge"  )+
+  facet_wrap(~seasons)
+```
+
+Nhận xét:
+
+-   Mùa thu: Không có sự khác biệt rõ rệt giữa các thời điểm trong ngày.
+    Số lượng xe đạp được thuê thấp và phân bố tương đối đồng đều.
+
+-   Mùa xuân: Buổi sáng và buổi tối có số lượng xe đạp được thuê thấp,
+    với phân bố khá nhỏ. Buổi chiều có số lượng xe đạp được thuê cao
+    nhất, điều này có thể do người dân tham gia nhiều hoạt động ngoài
+    trời hơn sau giờ làm việc và khi thời tiết ấm dần lên trong ngày.
+    Buổi trưa có số lượng xe đạp được thuê cao hơn so với sáng và tối,
+    nhưng vẫn thấp hơn buổi chiều.
+
+-   Mùa hè: Buổi trưa có số lượng xe đạp được thuê cao nhất. Buổi tối và
+    buổi chiều có số lượng xe đạp được thuê thấp hơn, có thể do nhiệt độ
+    buổi chiều và buổi tối không thuận lợi hoặc người dân ít có nhu cầu
+    thuê xe vào các thời điểm này.
+
+-   Mùa đông: Số lượng xe đạp được thuê rất ít vào tất cả các thời điểm
+    trong ngày, có thể do điều kiện thời tiết khắc nghiệt, lạnh giá làm
+    giảm nhu cầu sử dụng xe đạp.
+
+```{r fig.align="center", echo = FALSE,fig.width = 10, fig.height=7}
+ggplot(data,aes(x = rented_bike_count,y = hour)) + 
+    stat_slab(height = 2,color = "black")
+```
+
+Nhận xét: Số lượng thuê xe đạp thay đổi theo từng khung thời gian.
+
+```{r fig.align="center", echo = FALSE,fig.width = 14, fig.height=6}
+ggplot(data,aes(y = rented_bike_count,x = seasons,fill = holiday)) + 
+    geom_violin( )
+```
+
+Nhận xét:
+
+-   Vào mùa Thu và Xuân, phân phối số lượng xe đạp thuê có mô hình tương
+    tự với mật độ cao hơn ở các giá trị thấp và đuôi dài mở rộng đến các
+    giá trị cao hơn.
+
+-   Mùa Hạ có phân phối tương đối hẹp hơn, cho thấy sự biến đổi ít hơn
+    trong việc thuê xe đạp, với số lượng thuê vào các ngày nghỉ lễ cao
+    hơn một chút so với các ngày không phải nghỉ lễ.
+
+-   Mùa Đông cho thấy số lượng xe đạp thuê thấp nhất với sự giảm rõ rệt
+    so với các mùa khác. Phân phối cho các ngày nghỉ lễ và không nghỉ lễ
+    khá giống nhau vào mùa Đông.
+
+## Preprocessing
+
+```{r}
+data.clean1 <- data |> group_by(seasons,hour) |>
+  mutate(l = quantile(rented_bike_count,0.25) - 1.5*IQR(rented_bike_count), 
+         h = quantile(rented_bike_count,0.75) + 1.5*IQR(rented_bike_count)) |> 
+  filter(rented_bike_count >= l & rented_bike_count <= h) |> select(-c(h,l)) |> ungroup()
+```
+
+```{r}
+dis_mahalanobis <- function(X){
+  return(mahalanobis(X, colMeans(X),diag(1e-9, ncol(X))+ cov(X)))
+}
+
+index <- data.clean1 |> select(-rented_bike_count)|>  mutate(id= row_number()) |> 
+  group_by(seasons,hour) |> 
+  mutate(mahalanobis_dist = dis_mahalanobis(across(where(is.numeric)))  ) |> 
+  filter( mahalanobis_dist <= qchisq(0.95, ncol(across(where(is.numeric))))) |> 
+   pull(id)
+data.clean <- data.clean1[index,] |> select(-c(date))
+nrow(data.clean)
+```
+
+# Testing
+
+## Nhận định ban đầu
+
+Khi ta xét đến các bài toán về việc quản lý các dịch vụ công, ta cần
+quan tâm tới những ngày mà số lượng người sử dụng dịch vụ tăng mạnh.
+Thông thường ta có thể thấy vào những ngày nghỉ, ngày lễ số lượng người
+ra đường vui chơi sẽ nhiều hơn so với ngày thường. Từ giả định đó ta sẽ
+kiểm tra xem việc ngày đó có phải ngày nghỉ hay không liệu có ảnh hưởng
+đến số lượng xe đạp được thuê hay không.
+
+## AB test cho holiday
+
+Ta xem xét câu hỏi: "Liệu số lượng xe đạp được thuê vào các ngày nghỉ,
+ngày lễ có tăng đột biến hay không để từ đó thành phố có thể đề ra các
+kế hoạch ứng biến vào các ngày đặc biệt này".
+
+Trước hết ta có thể thấy rõ rằng phần trăm ngày nghỉ so với các ngày
+trong năm là rất thấp (ví dụ trong 1 tháng 4 tuần chỉ có 4 ngày Chủ Nhật
+so với 24 ngày bình thường), tuy nhiên không thể bỏ qua các trường hợp
+người ta sẽ gia tăng đột ngột việc thuê xe để giải trí, vui chơi vào các
+ngày nghỉ và ngày lễ.
+
+Do đó ta cần kiểm định cho hai loại ngày này.
+
+```{r ab_test}
+data <- data.clean
+data$holiday <- as.factor(data$holiday)
+data |> group_by(holiday) |> summarise(n = n(), mean = mean(rented_bike_count), sd = sd(rented_bike_count))
+```
+
+Kết quả cho thấy có 7485 lượt thuê xe vào ngày thường và 387 lượt thuê
+xe vào ngày nghỉ. Trung bình lượng thuê xe với ngày thường là cao hơn
+ngày nghỉ. Độ lệch chuẩn của ngày thường cũng lớn hơn, cho thấy độ biến
+động lượng thuê xe giữa các ngày thường là lớn hơn so với ngày nghỉ
+
+Biểu đồ violin dưới đây giúp ta khẳng định các nhận định trên, đồng thời
+cung cấp thêm thông tin về phân phối lượng thuê xe đạp, ở đây, dữ liệu
+của cả hai ngày đều cho thấy phân phối bất đối xứng và lệch phải của
+lượng thuê xe.
+
+```{r ab_test2}
+ggplot(data, aes(x = holiday, y = rented_bike_count, fill = holiday)) +
+  geom_violin() +
+  geom_boxplot(width = 0.15) +
+  labs(x = "Holiday", y = "Rented bike count") +
+  theme_bw() +
+  theme(legend.position = "none")
+```
+
+Thông qua bảng tổng hợp và biểu đổ violin, một giả định có thể được đưa
+ra: "số lượng thuê xe của ngày thường là nhiều hơn ngày nghỉ". Do đó, ta
+cần kiểm chứng giả thuyết và đối thuyết sau:
+
+$H_0: \mu_1 = \mu_0$
+
+$H_1: \mu_1 < \mu_0$
+
+Nếu $H_0$ đúng tức sự khác biệt giữa số lượng xe đạp được thuê giữa ngày
+nghỉ và ngày thường chỉ là kết quả của sự ngẫu nhiên (không có ý nghĩa
+thống kê). Để kiểm định giả thuyết này ta sử dụng kiểm định hoán vị, và
+p-value sẽ được tính cho kiểm định bên trái.
+
+```{r ab_test3}
+
+perm_fun <- function(x, n1, n0, R) {
+n <- n1 + n0
+mean_diff <- numeric(R)
+for (i in 1:R){
+idx_1 <- sample(x = 1:n, size = n1)
+idx_0 <- setdiff(x = 1:n, y = idx_1)
+mean_diff[i] <- mean(x[idx_1]) - mean(x[idx_0])
+}
+return(mean_diff)
+}
+
+set.seed(42)
+diff_mean_perm <- perm_fun(data$rented_bike_count, n1 = 387, n0 = 7485, R = 10000)
+
+
+ggplot(data = tibble(perm_diffs = diff_mean_perm), aes(x = perm_diffs)) +
+  geom_histogram(bins = 10, fill = "gray80", color = "black") +
+  labs(x = "Rented bike count differences", y = "Frequency") +
+  theme_bw()
+
+```
+
+Giá trị p-value
+
+```{r ab_test4}
+mean_0 <- mean(data$rented_bike_count[data$holiday == '0'])
+mean_1 <- mean(data$rented_bike_count[data$holiday == '1'])
+mean(diff_mean_perm < (mean_1 - mean_0))
+
+```
+
+Với mức ý nghĩa $\alpha = 0.05$, kết quả cho thấy sự khác biệt giữa số
+lượng xe đạp được thuê trong ngày nghỉ và ngày thường không phải do sự
+ngẫu nhiên (có ý nghĩa thống kê).
+
+Từ kết luận trên ta có thể thấy rằng, số lượng xe đạp được thuê vào ngày
+nghỉ sẽ không ảnh hưởng nhiều (không tăng đột biến) và vẫn ít hơn ngày
+thường. Tuy nhiên đây không phải yếu tố ảnh hưởng duy nhất đến việc thuê
+xe đạp của người dân
+
+## ANOVA test cho seasons
+
+Tiếp đến, cùng câu hỏi như trên nhưng lần này ta lại xét đến các mùa
+trong năm: "số lượng thuê xe đạp có bị ảnh hưởng bởi các mùa hay không?"
+
+Việc các mùa trong năm có thể ảnh hưởng đến số lượng thuê xe đạp rất
+nhiều. Ta có thể phỏng đoán rằng vào mùa đông thời tiết giá lạnh, người
+ta sẽ lựa chọn các loại phương tiện khác để giữ ấm thay vì chọn đạp xe
+dưới thời tiết khắc nghiệt kể trên. Hoặc vào mùa hè một lượng lớn du
+khách nước ngoài đến du lịch và trải nghiệm đạp xe ở Seoul cũng góp phần
+làm thay đổi số lượng thuê xe so với các mùa khác.
+
+Do đó ta sẽ kiểm định cho cả bốn mùa trong năm.
+
+```{r anova_test}
+data |> group_by(seasons) |> summarise(n = n(), mean = mean(rented_bike_count), sd = sd(rented_bike_count))
+```
+
+Đúng như chúng ta dự đoán trung bình số lượng xe đạp được thuê vào mùa
+đông là thấp nhất và vào mùa hè là cao nhất. Ta có thể thấy trung bình
+số lượng xe đạp được thuê của 4 mùa là khác nhau (về mặt giá trị).
+
+Trong khi đó, độ lệch chuẩn là cho thấy độ biến động trong số lượng xe
+đạp được thuê là khác biệt giữa các nhóm.
+
+Biểu đồ violin làm rõ hơn cho nhận xét ở trên.
+
+```{r anova_test2}
+ggplot(data, aes(x = seasons, y = rented_bike_count, fill = seasons)) +
+  geom_violin() +
+  geom_boxplot(width = 0.15) +
+  labs(x = "Seasons", y = "Rented bike count") +
+  theme_bw() +
+  theme(legend.position = "none")
+```
+
+Ta đặt giả thuyết như sau:
+
+$H_0: \mu_{\text{autumn}} = \mu_{\text{spring}} = \mu_{\text{summer}} = \mu_{\text{winter}}$
+
+$H_1:$ Ít nhất có một trung bình là khác với những cái còn lại.
+
+Để kiểm định cho giả thuyết trên ta thực hiện Permutation ANOVA.
+Permutation ANOVA là một phương pháp phân tích ANOVA khác không phụ
+thuộc vào một số giả định như là: dữ liệu trong mỗi nhóm phải tuân theo
+phân phối chuẩn, giả định về sự đồng nhất phương sai,...
+
+```{r anova_test3}
+set.seed(42)
+out_aov_1 <- aovp(formula = rented_bike_count ~ seasons, data = data, perm = "Prob")
+summary(out_aov_1)
+```
+
+Giá trị p-value được cho cung cấp bởi cột Pr(Prob) là 2.2e-16. Số lần
+lấy mẫu lặp lại là 5000, được cung cấp bởi cột Iter.
+
+Với mức ý nghĩa $\alpha = 0.05$, kết quả cho thấy sự khác biệt giữa số
+lượng xe đạp được thuê vào từng mùa là có ý nghĩa thống kê (có ít nhất
+một trung bình là khác với các cái còn lại).
+
+Từ kết luận trên, ta có thể thấy các mùa trong năm có ảnh hưởng đến số
+lượng thuê xe đạp. Thành phố có thể đưa ra các kế hoạch như là tăng
+cường xe đạp vào mùa hè để đáp ứng đủ nhu cầu và giảm bớt số lượng xe
+đạp vào mùa đông (có thể đưa về kho để tránh tình trạng hư hại do thời
+tiết).
+
+## ANOVA test kết hợp
+
+Từ các dữ kiện ở trên ta có thể thực hiện ANOVA cho cả mùa và ngày nghỉ.
+Ta sẽ xem xét thêm rằng các ngày nghỉ trong một mùa có ảnh hưởng tới số
+lượng thuê xe đạp hay không? Ví dụ vào mùa hè các học sinh được nghỉ học
+tuy nhiên bố mẹ chúng vẫn đi làm, chỉ cho đến cuối tuần mới có thời gian
+để đưa con của họ đi chơi, số lượng thuê xe đạp có thể sẽ tăng vào những
+ngày như vậy.
+
+```{r anova_test combine}
+data |> group_by(seasons, holiday) |> summarise(n = n(), mean = mean(rented_bike_count), sd = sd(rented_bike_count))
+```
+
+Có vẻ như phỏng đoán của chúng ta lại chính xác khi mà số ngày nghỉ,
+ngày lễ trong mùa hè rất thấp so với ngày thường tuy nhiên trung bình
+lượng thuê xe đạp lại sấp sỉ với ngày thường. Điều này cũng đúng với
+trường hợp mùa thu (có thể do mùa này không khí dễ chịu, cảnh sắc tươi
+đẹp nên người ta thường dành cuối tuần để đạp xe thư giãn)
+
+```{r anova_test combine2}
+ggplot(data, aes(x = seasons, y = rented_bike_count, fill = holiday)) +
+  geom_violin() +
+  labs(x = "Seasons", y = "Rented bike count", fill = "Holiday") +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  facet_wrap(~seasons, scales = "free") +
+  geom_boxplot(width = 0.15, position = position_dodge(width = 0.89)) 
+```
+
+Để kiểm tra xem việc này là do ngẫu nhiên hay không, ta sẽ thực hiện
+Permutation ANOVA.
+
+```{r anova_test combine3}
+set.seed(42)
+out_aov_2 <- aovp(formula = rented_bike_count ~ seasons*holiday, data = data, perm = "Prob")
+summary(out_aov_2)
+```
+
+Ta có thể thấy rằng, như kết luận ở phần trước, khi đứng độc lập thì các
+mùa trong năm và loại ngày sẽ ảnh hưởng đến số lượng thuê xe đạp (với
+mức ý nghĩa 5%).
+
+Ở kiểm định này ta cũng có thể thấy thêm được sự tương tác giữa ngày
+nghỉ và các mùa trong năm. Với mức ý nghĩa $\alpha = 0.05$, kết quả
+(p-value = 1) cho thấy sự khác biệt giữa số lượng xe đạp được thuê vào
+các loại ngày theo từng mùa là không có ý nghĩa thống kê.
+
+Do đó các ngày nghỉ, ngày lễ vẫn không phải là tác nhân chính ảnh hưởng
+đến việc thuê xe của người dân Hàn Quốc.
+
+## Mở rộng
+
+Việc ngày nghỉ, ngày lễ chỉ chiếm một phần nhỏ trong năm do đó khó mà
+gây ảnh hưởng đến số lượng xe đạp của người dân. Ta tiếp tục xét đến yếu
+tố thời gian trong ngày, ta sẽ kiểm định xem thời gian trong ngày có ảnh
+hưởng đến số lượng thuê xe hay không
+
+```{r mo_rong}
+data$holiday <- as.factor(data$time)
+data |> group_by(time) |> summarise(n = n(), mean = mean(rented_bike_count), sd = sd(rented_bike_count))
+```
+
+Ta có thể thấy trung bình số lượng xe đạp được thuê vào buổi chiều (từ
+13h đến 18h) là cao nhất
+
+```{r mo_rong2}
+ggplot(data, aes(x = time, y = rented_bike_count, fill = time)) +
+  geom_violin() +
+  geom_boxplot(width = 0.15) +
+  labs(x = "Seasons", y = "Rented bike count") +
+  theme_bw() +
+  theme(legend.position = "none")
+```
+
+```{r mo_rong3}
+set.seed(42)
+out_aov_3 <- aovp(formula = rented_bike_count ~ time, data = data, perm = "Prob")
+summary(out_aov_3)
+```
+
+Với mức ý nghĩa $\alpha = 0.05$, kết quả cho thấy sự khác biệt giữa số
+lượng xe đạp được thuê vào từng khung giờ là có ý nghĩa thống kê (có ít
+nhất một trung bình là khác với các cái còn lại).
+
+Từ kết luận trên, ta có thể thấy các khung giờ trong ngày có ảnh hưởng
+đến số lượng thuê xe đạp. Thành phố có thể đưa ra các kế hoạch như là
+tăng cường xe đạp vào từng khung giờ cụ thể để đáp ứng đủ nhu cầu của
+người dân.
+
+Tương tự như trên ta cũng kiểm tra xem các khung giờ theo từng mùa trong
+năm
+
+```{r mo_rong combine}
+data |> group_by(seasons, holiday) |> summarise(n = n(), mean = mean(rented_bike_count), sd = sd(rented_bike_count))
+```
+
+Tất cả các mùa đều có trung bình số lượng xe đạp được thuê vào buổi
+chiều là cao nhất.
+
+```{r mo_rong combine2}
+ggplot(data, aes(x = seasons, y = rented_bike_count, fill = time)) +
+  geom_violin() +
+  labs(x = "Seasons", y = "Rented bike count", fill = "Time") +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  facet_wrap(~seasons, scales = "free") +
+  geom_boxplot(width = 0.15, position = position_dodge(width = 0.89)) 
+```
+
+```{r mo_rong combine3}
+set.seed(42)
+out_aov_4 <- aovp(formula = rented_bike_count ~ seasons*time, data = data, perm = "Prob")
+summary(out_aov_4)
+```
+
+Với mức ý nghĩa $\alpha = 0.05$, kết quả cho thấy sự khác biệt giữa số
+lượng xe đạp được thuê vào từng khung giờ theo từng mùa là có ý nghĩa
+thống kê, cho thấy rằng tác động của mùa lên số lượng xe đạp thuê thay
+đổi tùy thuộc vào từng khung giờ.
+
+# Regression 
+
+## Data Model 
+
+Xây dựng mô hình hồi quy tuyến tính với biến phụ thuộc là
+rented_bike_count, và biến giải thích là các biến còn lại. 2 hướng nhắm
+tới là Linear Models và Generalized Linear Models. Chia tập dữ liệu
+thành 2 phần để đánh giá.
+
+```{r}
+data.model <- data.clean |> select(-time)
+
+slit_test_train <- function(df,pro=0.8,seed =30){
+  set.seed(seed)
+  N <-  nrow(df)
+  ind_train <- sample(1:N,size=floor(pro*N))
+  ind_test <- setdiff(1:N,ind_train)
+  data_train <- tibble( df[ind_train,])
+  data_test <- tibble( df[ind_test,])
+  return(list(data_train,data_test))
+}
+dummies <- dummyVars("~ .", data = data.model |> select(-rented_bike_count))
+data.numeric <- data.frame(predict(dummies, newdata = data.model |> select(-rented_bike_count)))
+data.numeric$rented_bike_count <- data.model$rented_bike_count
+rs <- slit_test_train(data.numeric,0.8)
+trainset_numeric <- as.data.frame(rs[1])
+testset_numeric <- as.data.frame(rs[2])
+rs <- slit_test_train(data.model,0.8)
+trainset <- as.data.frame(rs[1])
+testset <- as.data.frame(rs[2])
+```
+
+## Linear Regression
+
+```{r}
+md.ln <- lm(rented_bike_count ~ .,
+                           data = trainset)
+summary(md.ln)
+```
+
+Mô hình giải thích được hơn 68% lượng thay đổi trong các biến giải thích
+
+```{r}
+anova(md.ln, test="Chisq")
+```
+
+-   Các biến hour, temperature_c, humidity_percent,
+    dew_point_temperature_c, solar_radiation_mj_m2, rainfall_mm,
+    seasons, và holiday có ý nghĩa thống kê cao và ảnh hưởng lớn đến số
+    lượng xe đạp thuê.
+-   Các biến wind_speed_m_s và snowfall_cm không có ý nghĩa thống kê
+    trong mô hình này.
+
+```{r}
+y_pre_train <- predict(md.ln,trainset,type = "response")
+y_pre_test <- predict(md.ln,testset ,type = "response")
+rmse_train <- mean((trainset$rented_bike_count-y_pre_train) ^2) |> sqrt()
+rmse_test <- mean((testset$rented_bike_count-y_pre_test) ^2) |> sqrt()
+print(paste("RMSE của trainset:",rmse_train))
+print(paste("RMSE của testset:",rmse_test))
+```
+
+```{r}
+md.ln.cv <- errorest(rented_bike_count ~ .,
+                         data = data.model,model = lm,estimator="cv",
+                     est.para=control.errorest(k=5, predictions = TRUE))
+md.ln.cv
+```
+
+Dựa vào Rmse trên test, train, cũng như kết quả k-fold cross-validation,
+thì kết quả mô hình không bị overfitting nhưng rmse vẫn còn cao.
+
+```{r}
+set.seed(12)
+rmse_l <- rep(1,ncol(data.numeric))
+for( i in 1:ncol(data.numeric)){
+  data.pca <- as.data.frame(PCA(data.numeric |> select(-rented_bike_count), ncp =i, graph = F)$ind$coord) 
+  data.pca$rented_bike_count <- data.numeric$rented_bike_count
+  md.ln.cv <- errorest(rented_bike_count ~ .,
+                           data = data.pca,model = lm,estimator="cv",
+                       est.para=control.errorest(k=5, predictions = TRUE))
+  rmse_l[i] <- md.ln.cv$error
+}
+```
+
+```{r}
+which.min(rmse_l)
+rmse_l
+```
+
+Dù có PCA thì kết quả vẫn không hiệu quả hơn là mấy, vậy có thể kết luận
+dữ liệu không bị đa công tuyến quá nhiều.
+
+## Poisson regression
+
+```{r}
+md.ps <- glm(rented_bike_count ~ .,
+                           data = trainset,family = poisson)
+summary(md.ps)
+```
+
+Dựa vào bảng thống kê trên ta nhận thấy tham số phân tán là 1, nhưng
+thực chất với dữ liệu thực tế tình trạng này là thường xuyên gặp. Cụ thể
+trong trường hợp này là hơn 100
+($\phi = \frac{\sum (\text{Pearson residuals})^2}{n - p}$), do đấy mô
+hình đang bị overdispersion. Khi đó giả định về giả định rằng phương sai
+bằng trung bình không còn đúng.
+
+```{r}
+anova(md.ps, test="Chisq")
+```
+
+-   Các biến giải thích đều có p-value \< 2.2e-16.
+
+-   Biến giờ (hour), nhiệt độ (temperature_c), độ ẩm (humidity_percent),
+    mùa (seasons) và lượng mưa (rainfall_mm) là những biến có ảnh hưởng
+    lớn nhất.
+
+-   Các biến khác như tốc độ gió, tầm nhìn, nhiệt độ điểm sương, bức xạ
+    mặt trời, lượng tuyết rơi, và ngày lễ cũng có ảnh hưởng nhưng mức độ
+    ít hơn so với các biến chính.
+
+```{r}
+y_pre_train <- predict(md.ps,trainset,type = "response")
+y_pre_test <- predict(md.ps,testset ,type = "response")
+rmse_train <- mean((trainset$rented_bike_count-y_pre_train) ^2) |> sqrt()
+rmse_test <- mean((testset$rented_bike_count-y_pre_test) ^2) |> sqrt()
+print(paste("Rmse của trainset:",rmse_train))
+print(paste("Rmse của testset:",rmse_test))
+```
+
+```{r}
+myGLM = function(formula, data) {
+  glm(formula, data, family = poisson(link = log))
+}
+
+myPredictGLM = function(object, newdata){
+  predict(object, newdata , type="response")
+}
+
+md.ps.cv <- errorest(rented_bike_count ~ .,
+                         data = data.model, predict  = myPredictGLM,model = myGLM,estimator="cv",
+                     est.para=control.errorest(k=5, predictions = TRUE))
+md.ps.cv
+```
+
+Kết quả rmse tốt hơn so với mô hình hồi quy tuyến tính.
+
+```{r}
+md.ps.null <- glm(rented_bike_count ~ 1, family = "poisson", data = trainset)
+md.ps.R2 <- 1 - as.numeric(logLik(md.ps)) / as.numeric(logLik(md.ps.null))
+md.ps.R2
+```
+
+Với $Pseudo-R^2$ gần 0.8 cho thấy mức giải thích được cải thiện là gần
+80% với vo mô hình chỉ có bias.
+
+### Quasipoisson
+
+```{r}
+md.qps <- glm(rented_bike_count ~ .,
+                           data = trainset,family = quasipoisson)
+summary(md.qps)
+```
+
+```{r}
+anova(md.qps, test="Chisq")
+```
+
+-   Các biến hour, temperature_c, humidity_percent, wind_speed_m_s,
+    dew_point_temperature_c, solar_radiation_mj_m2, rainfall_mm,
+    snowfall_cm, seasons, và holiday đều có mức ý nghĩa thống kê cao
+    (Pr(\>Chi) \< 0.05).
+-   Biến visibility_10m không có mức ý nghĩa thống kê (Pr(\>Chi) \>
+    0.05), cho thấy nó không có ảnh hưởng đáng kể đến số lượng xe đạp
+    thuê trong mô hình này.
+-   Dữ liệu còn khá phân tán có thể chia ra thành các mùa, để các dữ
+    liệu ít bị phân tác hơn.
+
+```{r}
+y_pre_train <- predict(md.qps,trainset,type = "response")
+y_pre_test <- predict(md.qps,testset ,type = "response")
+rmse_train <- mean((trainset$rented_bike_count-y_pre_train) ^2) |> sqrt()
+rmse_test <- mean((testset$rented_bike_count-y_pre_test) ^2) |> sqrt()
+print(paste("Rmse của trainset:",rmse_train))
+print(paste("Rmse của testset:",rmse_test))
+```
+
+### Đánh giá
+
+```{r fig.align="center",fig.width = 10, fig.height=7}
+autoplot(md.ps, which = 1, ncol = 1, label.size = 3,
+         colour = "seasons",alpha = 0.6) + theme_bw()
+```
+
+Các điểm thặng dư đối xứng qua trục y=0, không xuất hiện đường cong bất
+thường nào. Điều này cho thấy tính tuyến tính của mô hình được bảo đảm.
+Tuy nhiên giả định đồng nhất phương sai là không đảm bảo, vì thặng dư co
+cụm về bên phải tăng đều, và phân tán mạnh hơn. Điều này một phần vì dữ
+liệu phân tán khá lớn, tuy nhiên các mô hình cũng không cần giả định này
+phải thoả mãn
+
+```{r fig.align="center",fig.width = 10, fig.height=7}
+autoplot(md.ps, which = 2, ncol = 1, label.size = 3,
+         colour = "seasons",alpha = 0.6) + theme_bw()
+```
+
+Thặng dư không tuân theo phân phối chuẩn, điều này là hiển nhiên vì đây
+là hồi quy poisson, nhưng số lượng mẫu khá lớn nên thăng dư cũng xấp xỉ
+gần với phân phối chuẩn.
+
+```{r fig.align="center",fig.width = 10, fig.height=7}
+autoplot(md.ps, which = 3, ncol = 1, label.size = 3,
+         colour = "seasons",alpha = 0.6) + theme_bw()
+```
+
+Như đã đề cập ở dữ liệu phân tán khá cao, giả định về đồng nhất phương
+sai thặng dư không đảm bảo. Ở đây ta thấy rõ ràng ngoài xu hướng càng
+tăng giá trị fit, càng tăng dần độ phân tán, độ phân tán còn có sự khác
+nhau ở các mùa.
+
+```{r fig.align="center",fig.width = 10, fig.height=10}
+autoplot(md.ps, which = 4:6, ncol = 1, label.size = 3,
+         colour = "seasons",alpha = 0.6) + theme_bw()
+```
+
+-   Cook's Distance: dùng để đo lường mức độ ảnh hưởng của từng điểm dữ
+    liệu đối với mô hình hồi quy. Điểm dữ liệu có giá trị Cook's
+    Distance lớn có thể có ảnh hưởng lớn đến các tham số ước lượng của
+    mô hình. +) Điểm 5212, 4494, 6029: Các điểm này có giá trị Cook's
+    Distance cao hơn hẳn so với các điểm khác, cho thấy chúng có ảnh
+    hưởng lớn đến mô hình. Những điểm này có thể là outliers hoặc có
+    leverage cao. +) Phần lớn các điểm có giá trị Cook's Distance nhỏ,
+    cho thấy chúng không ảnh hưởng nhiều đến mô hình.
+
+-   Residuals vs Leverage: kiểm tra mối quan hệ giữa residuals (sai số
+    dự đoán) và leverage (mức độ ảnh hưởng của một quan sát trong việc
+    xác định ước lượng của mô hình). +) Residuals lớn (Điểm 5212, 6029,
+    4494): Các điểm này có residuals lớn, có thể là dấu hiệu của các
+    outliers, cho thấy mô hình dự đoán kém đối với những điểm này. +)
+    Phân bố residuals: Phân bố residuals không đối xứng hoàn toàn xung
+    quanh trục y = 0. Điều này có thể chỉ ra rằng mô hình có vấn đề về
+    phân phối sai số. +) Leverage thấp: Hầu hết các điểm có leverage
+    thấp (gần 0), cho thấy chúng không ảnh hưởng mạnh đến mô hình.
+
+-   Cook's Distance vs Leverage: kiểm tra mối quan hệ giữa Cook's
+    Distance và leverage. Lệu những điểm có leverage cao (ảnh hưởng lớn)
+    cũng có Cook's Distance cao (ảnh hưởng đến mô hình) hay không. +)
+    Điểm 5212, 6029, 4494: Các điểm này có cả Cook's Distance và
+    leverage cao, cho thấy chúng có ảnh hưởng lớn đến mô hình và cần
+    được xem xét kỹ lưỡng. Nếu các điểm này là các outliers, có thể cân
+    nhắc loại bỏ chúng hoặc kiểm tra kỹ hơn để xem chúng có hợp lý hay
+    không. +) Phần lớn các điểm: Hầu hết các điểm còn lại có Cook's
+    Distance và leverage thấp, cho thấy chúng không ảnh hưởng nhiều đến
+    mô hình.
+
+```{r fig.align="center",fig.width = 10, fig.height=7}
+
+data.md.vs <- data.frame(trainset |> select(temperature_c,humidity_percent,wind_speed_m_s,visibility_10m,rainfall_mm,snowfall_cm,seasons) , parital_residual = residuals(md.ps) )
+data.md.vs.m <- gather(data.md.vs,var,val,-c(seasons,parital_residual) )
+ggplot(data.md.vs.m,aes(x = val, y  = parital_residual, color = seasons))+facet_wrap(~var,scales = 'free_x') + geom_point()
+```
+
+-   Humidity Percent +) Các giá trị partial residuals phân bố khá đồng
+    đều quanh trục y = 0. +) Không có sự khác biệt rõ ràng về phân bố
+    partial residuals theo mùa. +) Độ ẩm có vẻ không có mối quan hệ phi
+    tuyến với biến đáp ứng. Có thể biến này được mô hình hóa tốt bởi
+    Poisson Regression.
+
+-   Rainfall mm +) Các giá trị partial residuals khá phân tán, đặc biệt
+    ở mức lượng mưa thấp (dưới 1 mm). +) Phân bố partial residuals không
+    thay đổi nhiều theo mùa. +) Mối quan hệ không rõ ràng, có thể do một
+    số outliers. Cần kiểm tra thêm hoặc có thể cân nhắc biến đổi biến
+    này
+
+-   Snowfall cm +) Phân bố partial residuals: Các giá trị partial
+    residuals chủ yếu tập trung ở mức tuyết rơi bằng 0, với một số
+    outliers ở các giá trị tuyết rơi cao hơn. +) Phần lớn các điểm tuyết
+    rơi lớn xuất hiện vào mùa đông. +) Mối quan hệ phi tuyến rõ ràng
+    hơn, đặc biệt vào mùa đông. Cần kiểm tra thêm và có thể cần một số
+    biến đổi hoặc thêm biến tương tác để cải thiện mô hình.
+
+-   Temperature c +) Các giá trị partial residuals phân bố khá đồng đều
+    quanh trục y = 0. +) Có sự phân bố rõ ràng theo mùa: nhiệt độ cao
+    hơn vào mùa hè và thấp hơn vào mùa đông. +) Mối quan hệ giữa nhiệt
+    độ và partial residuals có thể được biểu diễn bằng một mô hình tuyến
+    tính.
+
+-   Visibility 10m +) Các giá trị partial residuals phân bố đồng đều,
+    với một số outliers. +) Không có sự khác biệt rõ ràng về phân bố
+    partial residuals theo mùa. +) Mối quan hệ không rõ ràng. Cần kiểm
+    tra thêm để xem liệu biến này có cần biến đổi hoặc loại bỏ không.
+
+-   Wind Speed m/s +) Các giá trị partial residuals phân bố đồng đều
+    quanh trục y = 0. +) Không có sự khác biệt rõ ràng về phân bố
+    partial residuals theo mùa. +) Tốc độ gió có vẻ được mô hình hóa tốt
+    bởi Poisson Regression. Mối quan hệ tuyến tính có thể hợp lý.
+
+### Khoảng tin cậy bootstraping:
+
+```{r}
+fun.boot<- function(data, ind, formula, ...){
+  data_new <- data[ind,]
+  out_md <- glm(formula = formula, data = data_new,family = poisson,...) 
+  return(out_md$coefficients)
+}
+md.ps.boot <- boot(data = data.model, statistic = fun.boot, R = 500,
+  formula = rented_bike_count~.)
+summary(md.ps.boot)
+```
+
+```{r}
+boot.ci(md.ps.boot, index = 1, type = "perc", conf = 0.95)
+```
+
+```{r}
+set.seed(14)
+sample <- data.model |> select(-rented_bike_count) |> sample_n(1) |> mutate(across(where(is.numeric), ~ . + .*rnorm(1, mean = 0, sd = 0.01)))
+print(t(sample))
+sample <- model.matrix(~ ., data = sample)
+y.pre.boot <- apply(md.ps.boot$t, 1, function(x){
+  exp(sample %*% x)
+  }) 
+quantile(y.pre.boot, probs = c(0.025, 0.975))
+```
+
+## Cải thiện model
+
+### Mô hình cho từng mùa
+
+#### Winter
+
+```{r}
+data.model.wt <- data.model[ data.model$ seasons =="Winter",- which(colnames(data.model) %in%  c('seasons'))]
+rs <- slit_test_train(data.model.wt,0.8)
+trainset <- as.data.frame(rs[1])
+testset <- as.data.frame(rs[2])
+
+
+md.qps.wt <- glm(rented_bike_count ~  .,family = quasipoisson('log'),data=trainset )
+summary(md.qps.wt)
+
+y_pre_train <- predict(md.qps.wt,trainset,type = "response")
+y_pre_test <- predict(md.qps.wt,testset ,type = "response")
+rmse_train <- mean((trainset$rented_bike_count-y_pre_train) ^2) |> sqrt()
+rmse_test <- mean((testset$rented_bike_count-y_pre_test) ^2) |> sqrt()
+print(paste("Rmse của trainset:",rmse_train))
+print(paste("Rmse của testset:",rmse_test))
+```
+
+```{r}
+myGLM = function(formula, data) {
+  glm(formula, data, family = quasipoisson(link = log))
+}
+
+myPredictGLM = function(object, newdata){
+  predict(object, newdata , type="response")
+}
+
+md.qps.cv.wt <- errorest(rented_bike_count ~ .,
+                         data = data.model.wt, predict  = myPredictGLM,model = myGLM,estimator="cv",
+                     est.para=control.errorest(k=5, predictions = TRUE))
+md.qps.cv.wt
+```
+
+#### Summer
+
+```{r}
+data.model.sm <- data.model[ data.model$ seasons =="Summer",- which(colnames(data.model) %in%  c('seasons'))]
+rs <- slit_test_train(data.model.sm,0.8)
+trainset <- as.data.frame(rs[1])
+testset <- as.data.frame(rs[2])
+
+
+md.qps.sm <- glm(rented_bike_count ~  .,family = quasipoisson('log'),data=trainset )
+summary(md.qps.sm)
+
+y_pre_train <- predict(md.qps.sm,trainset,type = "response")
+y_pre_test <- predict(md.qps.sm,testset ,type = "response")
+rmse_train <- mean((trainset$rented_bike_count-y_pre_train) ^2) |> sqrt()
+rmse_test <- mean((testset$rented_bike_count-y_pre_test) ^2) |> sqrt()
+print(paste("Rmse của trainset:",rmse_train))
+print(paste("Rmse của testset:",rmse_test))
+```
+
+```{r}
+myGLM = function(formula, data) {
+  glm(formula, data, family = quasipoisson(link = log))
+}
+
+myPredictGLM = function(object, newdata){
+  predict(object, newdata , type="response")
+}
+
+md.qps.cv.sm <- errorest(rented_bike_count ~ .,
+                         data = data.model.sm, predict  = myPredictGLM,model = myGLM,estimator="cv",
+                     est.para=control.errorest(k=5, predictions = TRUE))
+md.qps.cv.sm
+```
+
+Sau khi phân chia ra các mùa cụ thể ta thấy dữ liệu trong từng nhóm đồng
+chất hơn nên độ phân tán mô hình thấp hơn và cũng như rmse cũng thấp mô
+hình tổng.
+
+### Splines
+
+Cải thiện cho biến humidity_percent và temperature_c là 2 biến tác động
+lớn trong mô hình hồi quy poisson
+
+```{r}
+rs <- slit_test_train(data.model,0.8)
+trainset <- as.data.frame(rs[1])
+testset <- as.data.frame(rs[2])
+knots_h <- quantile(trainset$humidity_percent, probs = c(0.25, 0.5, 0.75)) 
+knots_t <- quantile(trainset$temperature_c, probs = c(0.25, 0.5, 0.75)) 
+md.ps.sl <- glm(rented_bike_count ~  hour + bs(temperature_c,knots_t,3) + bs(humidity_percent,knots_h,3) + wind_speed_m_s + dew_point_temperature_c +  solar_radiation_mj_m2 + rainfall_mm + snowfall_cm + holiday + seasons,
+                           data = trainset,family = quasipoisson)
+y_pre_train <- predict(md.ps.sl,trainset,type = "response")
+y_pre_test <- predict(md.ps.sl,testset ,type = "response")
+rmse_train <- mean((trainset$rented_bike_count-y_pre_train) ^2) |> sqrt()
+rmse_test <- mean((testset$rented_bike_count-y_pre_test) ^2) |> sqrt()
+print(paste("Rmse của trainset:",rmse_train))
+print(paste("Rmse của testset:",rmse_test))
+print(paste("Độ phân tán:",sum(residuals(md.ps.sl,"pearson" ) ^2 ) /md.ps.sl$df.residual ))
+```
+
+### Mô hình có sự tương tác
+
+```{r}
+rs <- slit_test_train(data.model,0.8)
+trainset <- as.data.frame(rs[1])
+testset <- as.data.frame(rs[2])
+
+
+md.ps.int <- glm(rented_bike_count ~ (hour + temperature_c + humidity_percent + wind_speed_m_s + dew_point_temperature_c +  solar_radiation_mj_m2 + rainfall_mm + snowfall_cm + holiday) * seasons,
+                           data = trainset,family = quasipoisson)
+y_pre_train <- predict(md.ps.int,trainset,type = "response")
+y_pre_test <- predict(md.ps.int,testset ,type = "response")
+rmse_train <- mean((trainset$rented_bike_count-y_pre_train) ^2) |> sqrt()
+rmse_test <- mean((testset$rented_bike_count-y_pre_test) ^2) |> sqrt()
+print(paste("Rmse của trainset:",rmse_train))
+print(paste("Rmse của testset:",rmse_test))
+print(paste("Độ phân tán:",sum(residuals(md.ps.int,"pearson" ) ^2 ) /md.ps.int$df.residual ))
+```
+
+```{r}
+anova(md.ps.int, test="Chisq")
+```
+
+Mô hình khi có sự tương tác giữa seasons với các yếu tố còn lại thực sự
+hiểu quả hơn, tuy nhiên độ phức tạp cũng tăng.
+
+### Co hệ số
+
+```{r}
+X <- data.numeric |> select(-rented_bike_count) |> scale() |> as.matrix()
+y <- data.numeric |> select(rented_bike_count)  |> unlist() 
+out.cv.lasso <- cv.glmnet(x = X, y = y, alpha = 1,
+type.measure = "mse", nfolds = 5,
+family = poisson)
+print(out.cv.lasso)
+```
+
+```{r}
+beta.lambda.lasso <- out.cv.lasso$lambda.min
+md.lasso <- glmnet(x = X, y = y, alpha = 1, family = quasipoisson)
+predict(md.lasso, s = beta.lambda.lasso, type = "coefficients")
+```
+
+Với phương pháp co hệ số ta co thể loại bỏ một số biến không tác động
+đến mô hình.
+
+
+# Tổng kết:
+Sau thực hiện mô hình ta rút ra được những insight, đó là sự biến đổi số lượng xe thuê giá phụ thuộc vào mùa, thời gian,và sự tác động các biến giải thích đến số lượng xe thuê. Từ đấy, phục vụ cho các mục đích kinh doanh, marketing,...
