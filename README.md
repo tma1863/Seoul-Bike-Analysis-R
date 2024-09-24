@@ -30,4 +30,5 @@ Dữ liệu SeoulBikeData.csv chứa thông tin về số lượng xe đạp đ�
 ## Các phương pháp xử lý dữ liệu được sử dụng:
 * Tiền xử lý và khai phá dữ liệu
 * Kiểm định giả thuyết thống kê
-* Xây dựng mô hình hồi quy
+* Xây dựng, so sánh và đánh giá các mô hình hồi quy
+
