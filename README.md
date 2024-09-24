@@ -11,20 +11,21 @@ cho thuê ổn định trở thành mối quan tâm lớn. Phần quan trọng l
 
 ## ABOUT DATASET
 Dữ liệu SeoulBikeData.csv chứa thông tin về số lượng xe đạp được thuê mỗi giờ trong ngày tại thành phố Seoul trong giai đoạn 01/12/2017 tới 30/11/2018 với các biến được quan sát:
-• Date : year-month-day
-• Rented Bike count - Count of bikes rented at each hour
-• Hour - Hour of the day
-• Temperature-Temperature in Celsius
-• Humidity - %
-• Windspeed - m/s
-• Visibility - 10m
-• Dew point temperature - Celsius
-• Solar radiation - MJ/m2
-• Rainfall - mm
-• Snowfall - cm
-• Seasons - Winter, Spring, Summer, Autumn
-• Holiday - Holiday/No holiday
-• Functional Day - NoFunc(Non Functional Hours), Fun(Functional hours)
+
+* Date : year-month-day
+* Rented Bike count - Count of bikes rented at each hour
+* Hour - Hour of the day
+* Temperature-Temperature in Celsius
+* Humidity - %
+* Windspeed - m/s
+* Visibility - 10m
+* Dew point temperature - Celsius
+* Solar radiation - MJ/m2
+* Rainfall - mm
+* Snowfall - cm
+* Seasons - Winter, Spring, Summer, Autumn
+* Holiday - Holiday/No holiday
+* Functional Day - NoFunc(Non Functional Hours), Fun(Functional hours)
 
 ## Các phương pháp xử lý dữ liệu được sử dụng:
 * Tiền xử lý và khai phá dữ liệu
